@@ -175,12 +175,19 @@
 window.Haptics = (function () {
   const H = { on: localStorage.getItem('bf_haptics') !== '0' };
   let last = 0;
-  const vib = (p) => { if (!H.on || !navigator.vibrate) return; try { navigator.vibrate(p); } catch (e) {} };
+  const vib = (p) => { if (!H.on || !navigator.vibrate || (navigator.userActivation && !navigator.userActivation.hasBeenActive)) return; try { navigator.vibrate(p); } catch (e) {} };
   H.tick = () => vib(8);
   H.select = () => vib([10, 30, 10]);
   H.pulseFull = () => vib([12, 40, 18, 40, 30]);
   H.impact = (s) => { const n = performance.now(); if (n - last < 90) return; last = n; vib(Math.min(80, 10 + s * 60) | 0); };
   H.horn = () => vib([60, 40, 90, 40, 140]);
+  // pass 5
+  H.ui = () => vib(6);
+  H.start = () => vib([30, 50, 30]);
+  H.result = (win) => vib(win ? [20, 60, 20, 60, 40] : [90]);
+  let lastThrow = 0;
+  H.thrown = () => { const n = performance.now(); if (n - lastThrow < 120) return; lastThrow = n; last = n; vib(14); };
+  H.broke = () => vib(30);
   H.set = (v) => { H.on = v; localStorage.setItem('bf_haptics', v ? '1' : '0'); if (v) vib(15); };
   return H;
 })();

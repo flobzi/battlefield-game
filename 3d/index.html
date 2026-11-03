@@ -29,6 +29,12 @@
   .side img{width:30px;height:20px;border-radius:2px}
   .side .meter{flex:1;height:6px;background:rgba(255,255,255,.15);border-radius:4px;overflow:hidden}
   .side .meter div{height:100%;background:#e8d9a8;transition:width .3s}
+  /* pass 5: two hairline gauges per side -- morale (gilt, reddens when low) over breath (pale sage) */
+  .side .gauges{flex:1;display:flex;flex-direction:column;gap:3px;min-width:40px}
+  .side .gauges .meter{flex:none;height:4px}
+  .side .gauges .meter.sta div{background:#b9c6a8}
+  .side .gauges .meter.low div{background:#c8664a}
+  .side b{font-family:Georgia,'Times New Roman',serif;font-weight:600;letter-spacing:.04em;min-width:24px;text-align:center}
   .side.e{flex-direction:row-reverse}
   #btnRally,#btnMute{position:fixed;pointer-events:auto;font:inherit;border-radius:30px;border:2px solid #f0dfae;background:rgba(94,58,28,.85);color:#fff6dc}
   #btnRally{right:14px;bottom:calc(env(safe-area-inset-bottom) + 16px);padding:10px 16px;font-size:16px}
@@ -109,8 +115,8 @@
 
 <div id="hud" class="hidden">
   <div class="bar">
-    <div class="side"><img id="hpflag"><span id="hpname"></span><div class="meter"><div id="hpbar" style="width:100%"></div></div><b id="hpcount"></b></div>
-    <div class="side e"><img id="heflag"><span id="hename"></span><div class="meter"><div id="hebar" style="width:100%"></div></div><b id="hecount"></b></div>
+    <div class="side"><img id="hpflag"><span id="hpname"></span><div class="gauges"><div class="meter mor" title="morale"><div id="hpmor" style="width:90%"></div></div><div class="meter sta" title="stamina"><div id="hpsta" style="width:100%"></div></div></div><b id="hpcount"></b></div>
+    <div class="side e"><img id="heflag"><span id="hename"></span><div class="gauges"><div class="meter mor" title="morale"><div id="hemor" style="width:90%"></div></div><div class="meter sta" title="stamina"><div id="hesta" style="width:100%"></div></div></div><b id="hecount"></b></div>
   </div>
   <div id="hint">drag: move · long drag: charge · tap: halt<br>2× tap men: split · 2× tap ground: regroup</div>
   <button id="btnMute">🔊</button>

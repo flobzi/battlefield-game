@@ -467,7 +467,8 @@ function updateCamera(dt) {
   const box = { x0, y0, x1, y1 }; const want = solveFit(box, yaw);
   if (!cam.init) { Object.assign(cam, want, { init: true, yaw }); }
   else {
-    const kz = 1 - Math.exp(-dt * (want.d > cam.d ? RC.zoomOutRate : RC.zoomInRate)), kp = 1 - Math.exp(-dt * RC.panRate);
+    const he = SIM.inputDown ? (RC.holdEase ?? 0.35) : 1;   // pass 5: a thumb is down -> ease much slower (the hard guarantee below still never loses a man)
+    const kz = 1 - Math.exp(-dt * (want.d > cam.d ? RC.zoomOutRate : RC.zoomInRate * he)), kp = 1 - Math.exp(-dt * RC.panRate * he);
     cam.d = lerp(cam.d, want.d, kz); cam.tx = lerp(cam.tx, want.tx, kp); cam.tz = lerp(cam.tz, want.tz, kp); cam.yaw = lerp(cam.yaw, yaw, kp);
     // hard guarantee: if the eased camera would cut anyone off, back out right now (ease never costs a unit)
     const need = minDist(cam.tx, cam.tz, cam.yaw, FP, 60, 8000); if (need > cam.d) cam.d = need;
@@ -521,9 +522,11 @@ function render(sim, simTime) {
   const cnt = [0, 0, 0, 0]; ENG.length = 0;
   for (const m of sim.men) {
     if (!m.alive) continue; const k = m.team * 2 + kindOf(m.type), S = SOLD[k]; if (!S) continue; const i = cnt[k]++; if (i >= S.cap) continue;
-    writeUpright(S.mesh.instanceMatrix.array, i * 16, m.x, m.y, m.face, manScale(m.id)); if (m.engaged) ENG.push(m);
+    if (m.z > 0 || m.tilt) poseMatrix(m.x, Math.max(0, m.z) * (RC.manHeight || 1), m.y, Math.PI / 2 - m.face, clamp(m.tilt, -1.45, 1.45), 0, manScale(m.id)).toArray(S.mesh.instanceMatrix.array, i * 16);   // pass 5: thrown by a charge / getting back up
+    else writeUpright(S.mesh.instanceMatrix.array, i * 16, m.x, m.y, m.face, manScale(m.id)); if (m.engaged) ENG.push(m);
     const sp = clamp(Math.hypot(m.vx, m.vy) / MV.charge, 0, 1), at = m.atk > 0 ? Math.sin(Math.PI * clamp(1 - m.atk / 0.3, 0, 1)) : 0;
-    const fl = (st === 'battle' && sel && m.group === sel ? 1 : 0) + (m.engaged && m.atk <= 0 ? 8 : 0) + hash(m.id * 7.3) * 0.98;
+    const brace = (m.engaged && m.atk <= 0) || (m.cover > 0 && m.type !== 'archer' && !m.flee && sp < 0.15);   // pass 5: shields up under falling arrows
+    const fl = (st === 'battle' && sel && m.group === sel ? 1 : 0) + (m.helmOff ? 2 : 0) + (brace ? 8 : 0) + hash(m.id * 7.3) * 0.98;
     const rc = m.lastHit > 0 ? clamp(1 - (simTime - m.lastHit) / 0.4, 0, 1) : 0, rcv = rc > 0 ? Math.sin(Math.PI * Math.sqrt(1 - rc)) : 0;
     const a = S.anim.array, o = i * 4; a[o] = m.step * Math.PI / 2 + hash(m.id) * 6.28; a[o + 1] = sp; a[o + 2] = rcv > at ? -rcv : at; a[o + 3] = fl;
   }
@@ -625,6 +628,12 @@ window.R3D = {
     if (!ready) return { x: -1e4, y: -1e4 };
     _w.set(x, 0, y).project(ctrlCam); return { x: (_w.x + 1) / 2 * window.innerWidth, y: (1 - _w.y) / 2 * window.innerHeight };
   },
+  toScreenH(x, y, h) {                         // pass 5: a point h world units above the ground (badges over a group's heads)
+    if (!ready) return { x: -1e4, y: -1e4 };
+    _w.set(x, h, y).project(ctrlCam); return { x: (_w.x + 1) / 2 * window.innerWidth, y: (1 - _w.y) / 2 * window.innerHeight };
+  },
+  manPx: (x, y) => (ready ? manPx(x, y) : 20),
+  thud(x, y) { if (!ready) return; spawnDust(x, y, 1.4); spawnMud(x, y, 0.8); spawnCloud(x, y, 0.8); },   // a thrown man lands
   pxPerUnit(x, y) { const a = this.toScreen(x, y), b = this.toScreen(x + 10, y), c = this.toScreen(x, y + 10); return Math.max(0.05, (Math.hypot(b.x - a.x, b.y - a.y) + Math.hypot(c.x - a.x, c.y - a.y)) / 20); },
   addDead, addItem,
   impact(k) {                                  // k 0..1 from the sim's impact meter

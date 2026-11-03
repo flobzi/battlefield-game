@@ -1,6 +1,6 @@
 // BATTLE FIELD GAME — simulation, input, bot, rendering, UI glue.
 (function () {
-  const C = CONFIG, MV = C.move, CB = C.combat;
+  const C = CONFIG, MV = C.move, CB = C.combat, MO = C.morale, WD = C.wounds, IM = C.impact, AR = C.arrows;
   const Q = new URLSearchParams(location.search);
   const AUTO = Q.has('auto');
   const WARP = Math.max(1, Math.min(8, Number(Q.get('warp')) || 1));                       // demo: both sides bot-controlled (screenshots)
@@ -51,7 +51,7 @@
     const names = BOT_NAMES.filter((n) => nameFits(n, pickT[1]) && n !== playerCfg.name);
     return { name: p(names.length ? names : ['Duskvale Host']), tunic, helmet: p(PALETTE.helmet.slice(0, 4)), shield: PALETTE.shield[pickT[1]], flag: { field: tunic, emblem: p(Art.EMBLEMS.filter((e) => e !== playerCfg.flag.emblem)), emblemCol: p(PALETTE.emblemCol) } };
   }
-  let teams = [], men = [], groups = [], nextGroupId = 1;
+  let teams = [], men = [], groups = [], nextGroupId = 1, fleeG = [];   // fleeG[team]: placeholder group for men who broke and run on their own (not commandable)
   function makeTeam(i, cfg) {
     const t = Object.assign({ id: i, alive: 0, initial: 0, routed: false, kills: 0 }, cfg);
     t.sprites = {}; for (const k in UNIT_TYPES) if (UNIT_TYPES[k].enabled) t.sprites[k] = Art.buildSprites(t, k);
@@ -68,7 +68,10 @@
       for (const type of list) {
         const T = UNIT_TYPES[type];
         const x = WW / 2 + (col - (cols - 1) / 2) * sp + (rand() - 0.5) * 2, y = frontY + back * row * sp + (rand() - 0.5) * 2;
-        const m = { id: men.length, team: ti, type, T, x, y, vx: 0, vy: 0, face: t.front, hp: 0, str: lerp(T.str[0], T.str[1], rand()), spd: lerp(T.spd[0], T.spd[1], rand()), stam: 1, cd: rand(), atk: 0, step: rand() * 4, alive: true, group: g, reload: 1 + rand() * 2, engaged: false, flee: false, bearer: false, aim: 0, lastHit: 0 };
+        const m = { id: men.length, team: ti, type, T, x, y, vx: 0, vy: 0, face: t.front, hp: 0, str: lerp(T.str[0], T.str[1], rand()), spd: lerp(T.spd[0], T.spd[1], rand()), stam: 1, cd: rand(), atk: 0, step: rand() * 4, alive: true, group: g, reload: 1 + rand() * 2, engaged: false, flee: false, bearer: false, aim: 0, lastHit: 0,
+                    // pass 5: morale / wounds / impacts
+                    mor: 0, brave: lerp(MO.brave[0], MO.brave[1], rand()), luck: rand() * 2 - 1, inj: false, stun: 0, z: 0, vz: 0, tilt: 0, spin: 0, ic: 0, cover: 0, helmOff: false, fleeT: 0, escaped: false };
+        m.mor = clamp(lerp(MO.start[0], MO.start[1], rand()) * (0.8 + 0.2 * m.brave), 40, 100);
         m.hp = m.maxHp = lerp(T.hp[0], T.hp[1], rand());
         men.push(m); g.members.push(m);
         if (++col >= cols) { col = 0; row++; }
@@ -76,13 +79,14 @@
       // standard bearer: front-centre spearman
       let best = null, bd = 1e9; for (const m of g.members) { const d = Math.abs(m.x - WW / 2) + Math.abs(m.y - frontY) * 2; if (m.type === 'spearman' && d < bd) { bd = d; best = m; } }
       if (best) { best.bearer = true; best.hp = best.maxHp *= 1.3; }
-      t.alive = t.initial = g.members.length; t.routed = false; t.kills = 0;
+      t.alive = t.initial = g.members.length; t.routed = false; t.kills = 0; t.fled = 0; t.hornT = -99; t.routT = 0;
+      fleeG[ti] = { id: -1 - ti, team: ti, flee: true, dir: { x: 0, y: 0 }, throttle: 0, moving: false, heading: t.front, ax: 0, ay: 0, vx: 0, vy: 0, n: 0, cx: 0, cy: 0, members: [] };
       reformGroup(g, true);
     }
   }
   // assign formation slots (ranks): spearmen front, archers back; preserves relative positions → no crossing
   function reformGroup(g, keepAnchor) {
-    const ms = g.members.filter((m) => m.alive); g.members = ms; if (!ms.length) return;
+    const ms = g.members.filter((m) => m.alive && m.group === g); g.members = ms; if (!ms.length) return;
     let cx = 0, cy = 0; for (const m of ms) { cx += m.x; cy += m.y; } cx /= ms.length; cy /= ms.length;
     const hx = Math.cos(g.heading), hy = Math.sin(g.heading), rx = -hy, ry = hx;
     for (const m of ms) { const dx = m.x - cx, dy = m.y - cy; m._d = -(dx * hx + dy * hy) + (m.type === 'archer' ? 1e4 : 0) + (m.bearer ? -1e4 : 0); m._l = dx * rx + dy * ry; }
@@ -124,10 +128,20 @@
       const ng = newGroup(team); ng.heading = src.heading; ng.throttle = 0; ng.dir = { x: src.dir.x, y: src.dir.y };
       const set = new Set(picked); src.members = src.members.filter((m) => !set.has(m)); ng.members = picked; picked.forEach((m) => (m.group = ng));
       reformGroup(src); reformGroup(ng); return ng;
+    } else if (cmd.type === 'splitIds') {          // bot wings: an explicit list of men (serialisable for a network peer)
+      const set = new Set(cmd.ids); const picked = men.filter((m) => set.has(m.id) && m.alive && !m.flee && m.team === team); if (!picked.length) return null;
+      const src = picked[0].group; const own = picked.filter((m) => m.group === src); if (own.length < 4 || own.length >= src.members.length - 2) return src;
+      const ng = newGroup(team); ng.heading = src.heading; ng.dir = { x: src.dir.x, y: src.dir.y }; const os = new Set(own);
+      src.members = src.members.filter((m) => !os.has(m)); ng.members = own; own.forEach((m) => (m.group = ng)); reformGroup(src); reformGroup(ng); return ng;
+    } else if (cmd.type === 'join') {              // fold one group into another (bot: bands under 5 men)
+      const g = groups.find((x) => x.id === cmd.group), into = groups.find((x) => x.id === cmd.into); if (!g || !into || g === into || g.team !== team || into.team !== team) return null;
+      g.members.forEach((m) => (m.group = into)); into.members.push(...g.members); g.members = []; reformGroup(into); groups = groups.filter((x) => x.members.length || x === selected); if (selected === g) selected = into; return into;
     } else if (cmd.type === 'merge' || cmd.type === 'rally') {
       if (!gs.length) return; const main = gs.reduce((a, b) => (b.members.length > a.members.length ? b : a));
       for (const g of gs) if (g !== main) { g.members.forEach((m) => (m.group = main)); main.members.push(...g.members); g.members = []; }
-      if (cmd.type === 'rally') { main.throttle = 0; main.moving = false; main.heading = teams[team].front; }
+      if (cmd.type === 'rally') { main.throttle = 0; main.moving = false; main.heading = teams[team].front;
+        // pass 5: the horn steadies the men -- runaways most of all (once per rallyHornCD s)
+        const t = teams[team]; if (battleT - t.hornT > MO.rallyHornCD) { t.hornT = battleT; for (const m of men) if (m.alive && m.team === team) m.mor = Math.min(100, m.mor + (m.flee ? MO.rallyHorn : MO.rallyHorn * 0.4)); } }
       reformGroup(main); groups = groups.filter((g) => g.members.length); return main;
     }
   }
@@ -155,8 +169,8 @@
   // --------------------------------------------------------------- update ---
   function updateGroups(dt) {
     for (const g of groups) {
-      g.members = g.members.filter((m) => m.alive); g.n = g.members.length; if (!g.n) continue;
-      let cx = 0, cy = 0; for (const m of g.members) { cx += m.x; cy += m.y; } g.cx = cx / g.n; g.cy = cy / g.n;
+      g.members = g.members.filter((m) => m.alive && m.group === g); g.n = g.members.length; if (!g.n) continue;
+      let cx = 0, cy = 0, st = 0, mo = 0; for (const m of g.members) { cx += m.x; cy += m.y; st += m.stam; mo += m.mor; } g.cx = cx / g.n; g.cy = cy / g.n; g.sta = st / g.n; g.mor = mo / g.n;
       const t = teams[g.team]; let sp = g.moving ? speedFor(g.throttle) : 0;
       const fwd = Math.cos(t.front) * g.dir.x + Math.sin(t.front) * g.dir.y;
       if (g.moving && fwd < -0.3) sp = Math.min(sp, MV.run * C.control.retreatSpeedMul);
@@ -180,15 +194,26 @@
     stats.engaged = stats.walkers = stats.runners = stats.chargers = stats.movers = 0; let mudSum = 0;
     for (const m of men) {
       if (!m.alive) continue; const T = m.T, g = m.group, team = teams[m.team];
+      // pass 5: thrown by a charge -> ballistic until he lands (no steering, can't be targeted)
+      if (m.z > 0) {
+        m.vz -= IM.gravity * dt; m.z += m.vz * dt; m.tilt += m.spin * dt;
+        m.x = clamp(m.x + m.vx * dt, 3, WW - 3); m.y = clamp(m.y + m.vy * dt, 3, WH - 3);
+        if (m.z <= 0) land(m); continue;
+      }
+      if (m.tilt) { m.tilt *= Math.exp(-dt * 4); if (Math.abs(m.tilt) < 0.02) m.tilt = 0; }   // getting back up after a throw
+      m.stun -= dt; m.ic -= dt; m.cover -= dt;
       // nearest enemy
       let ne = null, nd = MV.engageRadius;
-      forNear(m.x, m.y, MV.engageRadius, (o) => { if (o.team !== m.team) { const d = Math.hypot(o.x - m.x, o.y - m.y); if (d < nd) { nd = d; ne = o; } } });
+      forNear(m.x, m.y, MV.engageRadius, (o) => { if (o.team !== m.team && o.alive && o.z < 4) { const d = Math.hypot(o.x - m.x, o.y - m.y); if (d < nd) { nd = d; ne = o; } } });
       const stamMul = C.stamina.minSpeedMul + (1 - C.stamina.minSpeedMul) * m.stam;
-      const maxSp = MV.charge * 1.05 * m.spd * stamMul * speedAt(m.x, m.y);
+      const maxSp = MV.charge * 1.05 * m.spd * stamMul * speedAt(m.x, m.y) * (m.inj ? WD.speedMul : 1);
       let dx = 0, dy = 0, faceTo = null;
       m.engaged = false;
       const hx = Math.cos(g.heading), hy = Math.sin(g.heading);
-      if (m.flee) { dx = 0; dy = -Math.sin(team.front) * MV.run * 1.1; dx = (m.x - WW / 2) * 0.05; }
+      if (m.flee) {
+        m.fleeT += dt; dy = -Math.sin(team.front) * MV.run * 1.1; dx = (m.x - WW / 2) * 0.05;
+        if (ne) { const k = MV.run * 0.8 / (nd || 1); dx += (m.x - ne.x) * k; dy += (m.y - ne.y) * k; }   // veer away from whoever is chasing
+      }
       else if (ne && (T.behaviour === 'melee' || nd < MV.engageRadius * 0.55)) {
         m.engaged = true; const ux = (ne.x - m.x) / (nd || 1), uy = (ne.y - m.y) / (nd || 1);
         const gs = Math.hypot(g.vx, g.vy); const push = nd > T.reach * 0.8 ? Math.max(gs, MV.walk * 1.2) : 4;
@@ -198,28 +223,35 @@
         dx = (tx - m.x) * MV.formationK + g.vx; dy = (ty - m.y) * MV.formationK + g.vy;
         if (T.behaviour === 'ranged') archerThink(m, dt, g);
       }
+      if (m.stun > 0) { dx *= 0.15; dy *= 0.15; }
       if (m.aim > 0) { m.aim -= dt; faceTo = m.aimAng; }
-      // separation (allies soft, enemies hard: bodies collide)
-      let px = 0, py = 0; const sep = MV.separation;
-      forNear(m.x, m.y, sep, (o) => { if (o === m) return; const ox = m.x - o.x, oy = m.y - o.y, d2 = ox * ox + oy * oy; if (d2 > sep * sep || d2 < 1e-4) return; const d = Math.sqrt(d2), f = (sep - d) / sep * (o.team === m.team ? MV.sepK : MV.enemySepK); px += (ox / d) * f; py += (oy / d) * f; });
+      // separation (allies soft, enemies hard: bodies collide) + pass 5 charge impacts on fast contact
+      let px = 0, py = 0, imO = null, imC = 0; const sep = MV.separation;
+      forNear(m.x, m.y, sep, (o) => {
+        if (o === m || o.z > 4) return; const ox = m.x - o.x, oy = m.y - o.y, d2 = ox * ox + oy * oy; if (d2 > sep * sep || d2 < 1e-4) return; const d = Math.sqrt(d2), f = (sep - d) / sep * (o.team === m.team ? MV.sepK : MV.enemySepK); px += (ox / d) * f; py += (oy / d) * f;
+        if (o.team !== m.team && o.alive && m.ic <= 0 && o.ic <= 0) { const cl = ((m.vx - o.vx) * -ox + (m.vy - o.vy) * -oy) / d; if (cl > IM.min && cl > imC) { imC = cl; imO = o; } }
+      });
+      if (imO) impact(m, imO, imC);
       // steer
       let dl = Math.hypot(dx, dy); if (dl > maxSp) { dx = dx / dl * maxSp; dy = dy / dl * maxSp; }
       let ex = dx - m.vx, ey = dy - m.vy; const el = Math.hypot(ex, ey), acc = MV.accel * dt * 2;
       if (el > acc) { ex = ex / el * acc; ey = ey / el * acc; }
+      if (m.z > 0) continue;   // thrown by the impact above
       m.vx += ex; m.vy += ey;
       m.x = clamp(m.x + (m.vx + px * 0.12) * dt, 3, WW - 3); m.y = clamp(m.y + (m.vy + py * 0.12) * dt, 3, WH - 3);
+      if (m.flee && (m.y <= 6 || m.y >= WH - 6)) { escape(m); continue; }   // ran off the field: lives, but is out of the battle
       const sp = Math.hypot(m.vx, m.vy);
       // facing
       let fa = faceTo;
       if (fa === null) { if (sp > 6 && (m.vx * hx + m.vy * hy > -0.25 * sp || g.throttle > 0.5 || m.flee)) fa = Math.atan2(m.vy, m.vx); else fa = g.heading; }
       m.face += clamp(angDiff(m.face, fa), -8 * dt, 8 * dt);
-      // stamina
-      const S = C.stamina;
-      if (sp > MV.run * 0.95) m.stam -= S.drainCharge * dt; else if (sp > MV.walk * 1.3) m.stam -= S.drainRun * dt; else if (m.engaged) m.stam -= S.drainFight * dt; else if (sp > 3) m.stam += S.recoverWalk * dt; else m.stam += S.recoverIdle * dt;
+      // stamina (wounded men get their breath back slower)
+      const S = C.stamina, rec = m.inj ? WD.recoverMul : 1;
+      if (sp > MV.run * 0.95) m.stam -= S.drainCharge * dt; else if (sp > MV.walk * 1.3) m.stam -= S.drainRun * dt; else if (m.engaged) m.stam -= S.drainFight * dt; else if (sp > 3) m.stam += S.recoverWalk * rec * dt; else m.stam += S.recoverIdle * rec * dt;
       m.stam = clamp(m.stam, 0, 1);
       m.step += sp * dt * 0.28; m.cd -= dt; m.atk -= dt; m.reload -= dt;
       // melee
-      if (ne && !m.flee && m.cd <= 0 && nd < T.reach + ne.T.radius) attack(m, ne);
+      if (ne && !m.flee && m.stun <= 0 && m.cd <= 0 && nd < T.reach + ne.T.radius) attack(m, ne);
       // stats for audio / mud / grass
       if (m.engaged) stats.engaged++;
       if (sp > 3) {
@@ -233,14 +265,124 @@
     stats.mudUnder = stats.movers ? mudSum / stats.movers : 0;
   }
 
+  // ------------------------------------------------------- pass 5: morale ---
+  // Every man judges his own spot: enemies vs mates within MO.radius, runaways nearby, wounds, breath, and how the whole army is doing.
+  // Below MO.breakAt he breaks and runs for his own edge; once clear of the enemy his nerve comes back and he rallies to the nearest band.
+  let moraleAcc = 0;
+  function startFlee(m) {
+    if (m.flee) return; m.flee = true; m.fleeT = 0; m.engaged = false;
+    const g = m.group; m.group = fleeG[m.team]; if (g && g.members) { const i = g.members.indexOf(m); if (i >= 0) g.members.splice(i, 1); }
+  }
+  function rallyMan(m, dirty) {
+    let best = null, bd = MO.rallyJoin * MO.rallyJoin; const arch = m.type === 'archer';
+    for (const g of groups) { if (g.team !== m.team || !g.n) continue; const ga = g.members.every((o) => o.type === 'archer'); if (ga !== arch && g.members.length > 3) continue; const d = (g.cx - m.x) ** 2 + (g.cy - m.y) ** 2; if (d < bd) { bd = d; best = g; } }
+    m.flee = false; m.fleeT = 0; m.mor = Math.max(m.mor, 45);
+    if (!best) { best = newGroup(m.team); best.cx = m.x; best.cy = m.y; best.heading = teams[m.team].front; }
+    m.group = best; best.members.push(m); dirty.add(best);
+  }
+  function escape(m) { m.alive = false; m.escaped = true; m.flee = false; teams[m.team].alive--; teams[m.team].fled++; }
+  function moraleTick(dt) {
+    if ((moraleAcc += dt) < MO.tick) return; moraleAcc = 0;
+    const cnt = [0, 0]; for (const m of men) if (m.alive && !m.flee) cnt[m.team]++;
+    const fear = [0, 1].map((t) => { const r = cnt[t] / Math.max(1, cnt[1 - t]); return (r < 0.75 ? (0.75 - r) * 3 : 0) + (1 - cnt[t] / Math.max(1, teams[t].initial)) * 0.6; });
+    const R2 = MO.radius * MO.radius, F2 = MO.fleeRadius * MO.fleeRadius, dirty = new Set();
+    for (const m of men) {
+      if (!m.alive || m.z > 0) continue;
+      let nE = 0, nA = 0, nF = 0, ed2 = 1e9;
+      forNear(m.x, m.y, 76, (o) => {
+        if (o === m || !o.alive) return; const ox = o.x - m.x, oy = o.y - m.y, d2 = ox * ox + oy * oy;
+        if (o.team !== m.team) { if (!o.flee) { if (d2 < ed2) ed2 = d2; if (d2 < R2) nE++; } } else if (o.flee) { if (d2 < F2) nF++; } else if (d2 < R2) nA++;
+      });
+      const ed = Math.sqrt(ed2), hp = 100 * m.hp / m.maxHp;
+      if (!m.flee) {
+        let dm = 0;
+        if (nE > 0) dm -= Math.max(0, nE - nA * 0.8 - 0.5) * 0.6;
+        if (hp < 35) dm -= (35 - hp) * 0.02; if (nA >= 3) dm += 0.6;   // shoulder to shoulder with his mates, a man holds
+        if (m.stam < 0.2) dm -= 0.5;
+        dm -= nF * 0.2 + fear[m.team] * 0.4;
+        if (ed > 75) dm += 1.2;
+        if (nA >= 5 && nE <= 1) dm += 0.5;
+        m.mor = clamp(m.mor + (dm < 0 ? dm / m.brave : dm), 0, 100);
+        if (m.mor < MO.breakAt) startFlee(m);
+      } else {
+        m.mor = Math.min(100, m.mor + (ed > MO.rallyGap ? 3 * m.brave : 0.5));
+        if (m.mor > MO.rallyAt && ed > MO.rallyGap && m.hp > MO.rallyHp * m.maxHp && !teams[m.team].routed) rallyMan(m, dirty);
+        else if (m.fleeT > MO.escapeT && ed2 === 1e9) { let near = false; forNear(m.x, m.y, MO.escapeGap, (o) => { if (!near && o.alive && o.team !== m.team && !o.flee && Math.hypot(o.x - m.x, o.y - m.y) < MO.escapeGap) near = true; }); if (!near) escape(m); }
+      }
+    }
+    for (const g of dirty) { if (!groups.includes(g)) groups.push(g); reformGroup(g); }
+  }
+
+  // ------------------------------------------- pass 5: wounds, impacts, throws ---
+  const dbg = { melee: [0, 0], arrow: [0, 0], impact: [0, 0], land: [0, 0] }; let dbgC = 'melee';   // deaths by cause, for the headless tests
+  function hurt(d, dmg, a, ux, uy, imp) {
+    // now and then a lucky man lives through a blow that should have killed him
+    if (d.hp - dmg <= 0 && d.luck > 0 && rand() < d.luck * WD.luckChance) dmg = Math.max(0, d.hp - (3 + rand() * 5) * d.maxHp / 100);
+    d.hp -= dmg; d.lastHit = time; d.mor -= dmg * MO.hitK / d.brave;
+    if (!d.inj && (d.hp < WD.injAt * d.maxHp || (dmg > WD.bigHit * d.maxHp && rand() < WD.bigHitChance))) d.inj = true;
+    if (d.hp <= 0) { if (a) teams[a.team].kills++; dbg[dbgC][d.team]++; die(d, ux, uy, imp); dbgC = 'melee'; return true; }
+    dbgC = 'melee';
+    if (!d.helmOff && dmg > 0.22 * d.maxHp && rand() < 0.3) knockHelmet(d, ux, uy);
+    return false;
+  }
+  function knockHelmet(m, ux, uy) {
+    if (m.helmOff) return; m.helmOff = true;
+    particles.push({ k: 'helmet', x: m.x, y: m.y, z: 14, vx: ux * (30 + rand() * 40) + (rand() - 0.5) * 30, vy: uy * (30 + rand() * 40) + (rand() - 0.5) * 30, vz: 50 + rand() * 50, r: rand() * 6.28, vr: (rand() - 0.5) * 20, team: m.team, b: 1 });
+  }
+  const flankOf = (d, ax, ay) => { const rel = Math.abs(angDiff(d.face, Math.atan2(ay - d.y, ax - d.x))); return d.flee ? IM.flank.rear : rel < 1 ? IM.flank.front : rel < 2.2 ? IM.flank.side : IM.flank.rear; };
+  function impact(a, b, closing) {
+    const nx = (b.x - a.x), ny = (b.y - a.y), l = Math.hypot(nx, ny) || 1, ux = nx / l, uy = ny / l;
+    const pa = a.vx * ux + a.vy * uy, pb = -(b.vx * ux + b.vy * uy);
+    let atk = a, def = b, dir = 1; if (pb > pa) { atk = b; def = a; dir = -1; }
+    if (atk.flee || atk.stun > 0) return;
+    const fl = flankOf(def, atk.x, atk.y), front = fl === IM.flank.front;
+    const braced = !!def.T.braceBonus && front && !def.flee && Math.hypot(def.vx, def.vy) < 12;   // braced spears blunt a charge and can't be bowled over
+    let power = (closing - IM.min) * (0.55 + 0.45 * atk.stam) * atk.str; if (braced) power /= def.T.braceBonus * 1.6;
+    const dmg = power * IM.dmgK * fl / (def.T.shield && front ? 1.2 : 1) * (def.type === 'archer' ? 1.25 : 1);
+    a.ic = b.ic = IM.cooldown; atk.stam = Math.max(0, atk.stam - 0.03);
+    def.mor -= 2.5 * fl / def.brave; def.stun = Math.max(def.stun, 0.25 + power * 0.006);
+    const vis = onScreen(def.x, def.y), mine = atk.team === 0 || def.team === 0;
+    if (vis) AudioSys.playLimited('shield_block', 6, { vol: Math.min(0.8, 0.3 + power / 60), pan: panOf(def.x) });
+    if (!braced && closing > IM.throwAt && rand() < (closing - IM.throwAt) / 40 + 0.1 * (fl - 1)) {
+      def.vz = 50 + closing * 0.6; def.z = 0.1; def.vx = dir * ux * closing * 0.9; def.vy = dir * uy * closing * 0.9; def.spin = (rand() - 0.5) * 8; def.engaged = false;
+      if (rand() < IM.helmChance) knockHelmet(def, dir * ux, dir * uy);
+      if (mine) { stats.impact += 1.6; Haptics.thrown(); }
+    } else if (mine) stats.impact += 0.4;
+    dbgC = 'impact'; hurt(def, dmg, atk, dir * ux, dir * uy, 1 + power / 40); dbgC = 'melee';
+  }
+  function land(m) {
+    m.z = 0; m.vz = 0; m.vx *= 0.25; m.vy *= 0.25; m.spin = 0; m.tilt = clamp(m.tilt, -1.45, 1.45); m.stun = Math.max(m.stun, IM.landStun);
+    if (R3D && R3D.thud) R3D.thud(m.x, m.y);
+    if (onScreen(m.x, m.y)) AudioSys.playSliced('armor_clank', { vol: 0.5, pan: panOf(m.x) });
+    const l = Math.hypot(m.vx, m.vy) || 1; dbgC = 'land'; hurt(m, (4 + rand() * 6) * m.maxHp / 100, null, m.vx / l, m.vy / l, 1.2);
+  }
+
+  // ---------------------------------------------- pass 5: archers' auto-aim ---
+  // Each band of archers picks the thickest knot of enemies in range (foes - 4 x friends within knotR), leads it by its walk, and re-picks every AR.retarget s.
+  function autoAim(team, cx, cy, range) {
+    const cand = men.filter((s) => s.alive && s.team !== team && !s.flee && s.z < 4 && Math.hypot(s.x - cx, s.y - cy) < range - 15); if (!cand.length) return null;
+    let best = null, bs = 0;
+    for (let i = 0; i < Math.min(40, cand.length); i++) { const s = cand[(rand() * cand.length) | 0]; let sc = 0; forNear(s.x, s.y, AR.knotR, (o) => { if (o.alive && !o.flee && Math.hypot(o.x - s.x, o.y - s.y) < AR.knotR) sc += o.team !== team ? 1 : -AR.friendlyK; }); if (sc > bs) { bs = sc; best = s; } }
+    if (!best || bs < 3) return null;
+    let x = 0, y = 0, n = 0; forNear(best.x, best.y, AR.knotR, (o) => { if (o.alive && !o.flee && o.team !== team && Math.hypot(o.x - best.x, o.y - best.y) < AR.knotR) { x += o.x + o.vx * AR.lead; y += o.y + o.vy * AR.lead; n++; } });
+    return n ? { x: x / n, y: y / n, n: bs } : null;
+  }
   function archerThink(m, dt, g) {
-    if (m.reload > 0 || Math.hypot(g.vx, g.vy) > m.T.volleyMoveMax) return;
-    const foes = teams[1 - m.team]; let tgt = null;
-    for (let k = 0; k < 8; k++) { const o = men[(rand() * men.length) | 0]; if (!o.alive || o.team === m.team) continue; const d = Math.hypot(o.x - m.x, o.y - m.y); if (d > m.T.minRange && d < m.T.range) { tgt = o; break; } }
-    if (!tgt) { m.reload = 0.3; return; }
-    const d = Math.hypot(tgt.x - m.x, tgt.y - m.y), A = C.arrows; const T = d / A.speed;
-    const lx = tgt.x + tgt.vx * T + (rand() - 0.5) * A.spread * 2, ly = tgt.y + tgt.vy * T + (rand() - 0.5) * A.spread * 2;
-    arrows.push({ x0: m.x, y0: m.y, x1: lx, y1: ly, t: 0, T, team: m.team, h: d * A.arcK, str: m.str });
+    if (m.reload > 0 || m.stun > 0 || Math.hypot(g.vx, g.vy) > m.T.volleyMoveMax) return;
+    if (!(g.aimT > battleT)) {          // (re)pick this band's target
+      g.aimT = battleT + AR.retarget; let ax = 0, ay = 0, an = 0; for (const o of g.members) if (o.type === 'archer') { ax += o.x; ay += o.y; an++; }
+      g.aim = an ? autoAim(m.team, ax / an, ay / an, m.T.range) : null;
+    }
+    const tg = g.aim; if (!tg) { m.reload = 0.3; return; }
+    const d = Math.hypot(tg.x - m.x, tg.y - m.y); if (d > m.T.range || d < m.T.minRange) { m.reload = 0.3; return; }
+    const sc = AR.scatter[0] + d * AR.scatter[1], an = rand() * 6.283, r = Math.sqrt(rand()) * sc, lx = tg.x + Math.cos(an) * r, ly = tg.y + Math.sin(an) * r * 0.8;
+    // no archer shoots into a melee where his own spearmen stand
+    let friend = false; forNear(lx, ly, AR.friendlyR, (o) => { if (!friend && o.alive && o.team === m.team && !o.flee && o.type !== 'archer' && Math.hypot(o.x - lx, o.y - ly) < AR.friendlyR) friend = true; });
+    if (friend) { m.reload = 0.5; return; }
+    const T = d / AR.speed;
+    arrows.push({ x0: m.x, y0: m.y, x1: lx, y1: ly, t: 0, T, team: m.team, h: d * AR.arcK, str: m.str });
+    // the men under the falling arrows see them coming: whoever stands still raises his shield
+    forNear(lx, ly, AR.coverR, (o) => { if (o.alive && o.team !== m.team && o.T.shield && !o.flee) o.cover = Math.max(o.cover, T + 0.6); });
     m.reload = lerp(m.T.reload[0], m.T.reload[1], rand()) * (1.4 - 0.4 * m.stam); m.atk = 0.35; m.aim = 0.5; m.aimAng = Math.atan2(ly - m.y, lx - m.x);
     // one volley sound per team every ~0.9s at the firing archers; whoosh timed to peak as arrows descend
     if (onScreen(m.x, m.y) && AudioSys.allowRate('volley' + m.team, 0.9)) AudioSys.play('arrow_loose', { vol: m.team === 0 ? 0.8 : 0.55, pan: panOf(m.x), pitchVar: 0.04 });
@@ -253,8 +395,8 @@
     const closing = Math.max(0, (a.vx - d.vx) * ux + (a.vy - d.vy) * uy);
     let momentum = 1 + CB.momentumK * Math.min(1.5, closing / MV.charge);
     const cosA = Math.cos(d.face) * -ux + Math.sin(d.face) * -uy; // >0: attacker in front of defender
-    const angleF = cosA > 0.35 ? CB.angle.front : cosA > -0.35 ? CB.angle.side : CB.angle.rear;
-    if (d.T.braceBonus && cosA > 0.35 && Math.hypot(d.vx, d.vy) < 12) momentum = 1 + (momentum - 1) / d.T.braceBonus;   // braced spears blunt charges
+    const angleF = d.flee ? CB.angle.rear : cosA > 0.35 ? CB.angle.front : cosA > -0.35 ? CB.angle.side : CB.angle.rear;   // a runaway's back is turned
+    if (d.T.braceBonus && !d.flee && cosA > 0.35 && Math.hypot(d.vx, d.vy) < 12) momentum = 1 + (momentum - 1) / d.T.braceBonus;   // braced spears blunt charges
     let na = 0, nd = 0; forNear(d.x, d.y, CB.supportRadius, (o) => { if (o === d || o === a) return; if (Math.hypot(o.x - d.x, o.y - d.y) < CB.supportRadius) { if (o.team === a.team) na++; else nd++; } });
     const supF = clamp(1 + CB.supportK * (na - nd) / (na + nd + 1), 0.5, 1.8);
     const stamF = 0.55 + 0.45 * a.stam;
@@ -262,24 +404,26 @@
     const vis = onScreen(d.x, d.y);
     if (a.team === 0 || d.team === 0) stats.impact += (momentum - 1) * 2 + (angleF - 1) * 0.6 + 0.15;
     if (rand() > hitP) { if (vis && rand() < 0.3) AudioSys.playLimited('clash', C.audio.clashPerSec, { vol: 0.5, pan: panOf(d.x) }); return; }
-    if (d.T.shield && cosA > 0.35 && rand() < CB.shieldBlock * (0.4 + 0.6 * d.stam) / Math.sqrt(momentum)) {
+    if (d.T.shield && !d.flee && cosA > 0.35 && rand() < CB.shieldBlock * (0.4 + 0.6 * d.stam) / Math.sqrt(momentum)) {
       d.stam -= 0.03 * momentum; d.vx += ux * CB.knockback * 0.3 * momentum; d.vy += uy * CB.knockback * 0.3 * momentum;
       if (vis) AudioSys.playLimited('shield_block', 5, { vol: 0.6, pan: panOf(d.x) }); return;
     }
-    const dmg = CB.baseDmg * (a.str / Math.sqrt(d.str)) * momentum * angleF * supF * stamF * (1 + (rand() * 2 - 1) * CB.randomness);
-    d.hp -= dmg; d.lastHit = time;
+    const dmg = CB.baseDmg * (a.str / Math.sqrt(d.str)) * momentum * angleF * supF * stamF * (0.65 + 0.35 * a.mor / 100) * (a.inj ? 0.85 : 1) * (1 + (rand() * 2 - 1) * CB.randomness);
+    if (angleF > 1) d.mor -= (angleF - 1) * MO.flankK;   // hit from the side or behind: that shakes a man
     const kb = CB.knockback * (momentum - 0.7); d.vx += ux * kb; d.vy += uy * kb;
     if (vis) AudioSys.playLimited('clash', C.audio.clashPerSec, { vol: 0.8, pan: panOf(d.x), rate: 0.9 + rand() * 0.2 });
-    if (d.hp <= 0) { teams[a.team].kills++; die(d, ux, uy, momentum * angleF); }
+    if (hurt(d, dmg, a, ux, uy, momentum * angleF)) {}
     else { decalQ.push(['blood', d.x, d.y, 1.6 + rand(), ux, uy, 0.55]); spawnBlood(d.x, d.y, ux, uy, 3, 0.6); if (vis && rand() < 0.35) AudioSys.playSliced('blood', { vol: 0.45, pan: panOf(d.x) }); }
   }
 
   function die(m, ux, uy, imp) {
     m.alive = false; teams[m.team].alive--; stats.deathRate += 1;
     const fly = clamp(imp, 1, 5); const vis = onScreen(m.x, m.y); const FM = C.fx.flingMul || 1, hv = 1 + (FM - 1) * clamp((fly - 1.2) / 1.5, 0, 1);   // flingMul: heavy impacts throw bodies further (3D)
-    particles.push({ k: 'body', x: m.x, y: m.y, z: 1, vx: m.vx * 0.4 + ux * (14 + fly * 16) * (0.6 + rand()) * hv, vy: m.vy * 0.4 + uy * (14 + fly * 16) * (0.6 + rand()) * hv, vz: (18 + fly * 18 * rand()) * Math.sqrt(hv), heavy: hv > 1.3, r: m.face, vr: (rand() - 0.5) * 3 * fly, team: m.team, type: m.type, helmOff: false });
+    // pass 5: a death shakes his mates nearby and heartens the enemy
+    forNear(m.x, m.y, MO.deathRadius, (o) => { if (!o.alive || o === m || Math.hypot(o.x - m.x, o.y - m.y) > MO.deathRadius) return; if (o.team === m.team) o.mor -= MO.deathFriend / o.brave; else o.mor = Math.min(100, o.mor + MO.deathFoe); });
+    particles.push({ k: 'body', x: m.x, y: m.y, z: Math.max(1, m.z), vx: m.vx * 0.4 + ux * (14 + fly * 16) * (0.6 + rand()) * hv, vy: m.vy * 0.4 + uy * (14 + fly * 16) * (0.6 + rand()) * hv, vz: (18 + fly * 18 * rand()) * Math.sqrt(hv), heavy: hv > 1.3, r: m.face, vr: (rand() - 0.5) * 3 * fly, team: m.team, type: m.type, helmOff: false });
     const body = particles[particles.length - 1];
-    if (rand() < 0.65) { body.helmOff = true; particles.push({ k: 'helmet', x: m.x, y: m.y, z: 4, vx: ux * 30 * fly * rand() + (rand() - 0.5) * 40, vy: uy * 30 * fly * rand() + (rand() - 0.5) * 40, vz: 40 + 50 * rand() * fly / 2, r: 0, vr: (rand() - 0.5) * 20, team: m.team, b: 1 }); }
+    if (m.helmOff) body.helmOff = true; else if (rand() < 0.5) { body.helmOff = true; particles.push({ k: 'helmet', x: m.x, y: m.y, z: 4, vx: ux * 30 * fly * rand() + (rand() - 0.5) * 40, vy: uy * 30 * fly * rand() + (rand() - 0.5) * 40, vz: 40 + 50 * rand() * fly / 2, r: 0, vr: (rand() - 0.5) * 20, team: m.team, b: 1 }); }
     const items = m.T.dropItems || [];
     for (const it of items) if (it !== 'helmet' && rand() < 0.6) particles.push({ k: it, x: m.x, y: m.y, z: 4, vx: (rand() - 0.5) * 60 + ux * 20 * fly, vy: (rand() - 0.5) * 60 + uy * 20 * fly, vz: 30 + 60 * rand(), r: rand() * 6.28, vr: (rand() - 0.5) * 18, team: m.team, b: 0 });
     spawnBlood(m.x, m.y, ux, uy, (C.fx.bloodDrops[0] + rand() * (C.fx.bloodDrops[1] - C.fx.bloodDrops[0])) | 0, 1 + fly * 0.3);
@@ -305,13 +449,16 @@
     }
     for (let i = arrows.length - 1; i >= 0; i--) {
       const a = arrows[i]; a.t += dt / a.T; if (a.t < 1) continue; arrows.splice(i, 1);
-      let hit = null; forNear(a.x1, a.y1, C.arrows.hitRadius, (o) => { if (!hit && o.team !== a.team && Math.hypot(o.x - a.x1, o.y - a.y1) < C.arrows.hitRadius) hit = o; });
+      let hit = null, hd = AR.hitRadius; forNear(a.x1, a.y1, AR.hitRadius, (o) => { if (!o.alive || o.z > 4) return; const d = Math.hypot(o.x - a.x1, o.y - a.y1); if (d < hd) { hd = d; hit = o; } });
       if (hit) {
+        // pass 5: moving men are easy marks; still men behind raised shields mostly shrug arrows off (friendly fire possible in a melee)
         const ux = (a.x1 - a.x0), uy = (a.y1 - a.y0), l = Math.hypot(ux, uy) || 1; const cosA = Math.cos(hit.face) * -ux / l + Math.sin(hit.face) * -uy / l;
-        if (hit.T.shield && cosA > 0.3 && rand() < C.arrows.shieldBlock) { if (onScreen(hit.x, hit.y)) AudioSys.playLimited('arrow_hit', 5, { vol: 0.4 }); decalQ.push(['arrow', a.x1, a.y1, Math.atan2(uy, ux)]); continue; }
-        hit.hp -= C.arrows.damage * a.str * (0.6 + rand() * 0.8) * (cosA < -0.3 ? 1.5 : 1);
+        const sp = Math.hypot(hit.vx, hit.vy), shield = hit.T.shield && hit.cover > 0 && sp < 12 && !hit.flee, P = AR.hitP;
+        const ch = hit.flee ? P.flee : hit.type === 'archer' ? (sp > 12 ? P.moving : P.archer) : sp >= 12 ? P.moving : shield ? P.shield : P.still;
+        if (rand() >= ch) { if (shield && onScreen(hit.x, hit.y)) AudioSys.playLimited('arrow_hit', 5, { vol: 0.4 }); decalQ.push(['arrow', a.x1 + (rand() - 0.5) * 4, a.y1 + (rand() - 0.5) * 4, Math.atan2(uy, ux)]); continue; }
+        const D = sp >= 12 ? AR.dmgMoving : AR.dmgStill; hit.mor -= MO.arrowHit / hit.brave;
         if (onScreen(hit.x, hit.y)) AudioSys.playLimited('arrow_hit', 5, { vol: 0.6 });
-        if (hit.hp <= 0) { teams[a.team].kills++; die(hit, ux / l, uy / l, 1); } else spawnBlood(hit.x, hit.y, ux / l, uy / l, 2, 0.5);
+        dbgC = 'arrow'; if (!hurt(hit, lerp(D[0], D[1], rand()) * a.str / 0.8 * (cosA < -0.3 || hit.flee ? 1.5 : 1), { team: a.team }, ux / l, uy / l, 1)) spawnBlood(hit.x, hit.y, ux / l, uy / l, 2, 0.5);
       } else decalQ.push(['arrow', a.x1, a.y1, Math.atan2(a.y1 - a.y0, a.x1 - a.x0)]);
     }
   }
@@ -342,22 +489,78 @@
 
   // ------------------------------------------------------------------ bot ---
   // Bot = a Commander that only uses Commands.issue (same API as the player / a network peer).
+  // pass 5: the computer general (ported from the Thumb Legions plan). Archers split off; two 22% wings peel off the sides of the block.
+  // advance -> pin (centre halts holdDist short of your line, in its own bow range, while the wings swing round to halfW + 70..90)
+  // -> assault when both wings are set, after pinMax s of pinning, or when more than assaultContact of the army is already in contact.
+  // Paces walk / run / charge by distance and breath; bands under foldBelow men fold into the nearest bigger one. Works for either side.
   function makeBot(team) {
-    return { team, t: 0, phase: 0, flankDone: false, archersDone: false, think(dt) {
-      if ((this.t -= dt) > 0) return; this.t = C.bot.thinkEvery;
-      const mine = groups.filter((g) => g.team === team && g.n); if (!mine.length) return;
-      const foe = teams[1 - team]; let ex = 0, ey = 0, n = 0; for (const m of men) if (m.alive && m.team !== team) { ex += m.x; ey += m.y; n++; } if (!n) return; ex /= n; ey /= n;
-      if (!this.archersDone && battleT > 0.5) { this.archersDone = true; Commands.issue(team, { type: 'splitType', unitType: 'archer' }); }
-      if (!this.flankDone && battleT > C.bot.flankAfter) { this.flankDone = true; const main = mine.reduce((a, b) => (b.n > a.n ? b : a)); const side = rand() < 0.5 ? -1 : 1; const hx = Math.cos(main.heading), hy = Math.sin(main.heading); let wx = main.cx, wy = main.cy, bd = -1e9; for (const m of main.members) { if (m.type !== 'spearman') continue; const l = (m.x - main.cx) * -hy * side + (m.y - main.cy) * hx * side; if (l > bd) { bd = l; wx = m.x; wy = m.y; } } const fg = Commands.issue(team, { type: 'split', x: wx, y: wy, r: 70 }); if (fg) fg.flankSide = side; }
+    const B = C.bot, PACE = [0, 0.4, 0.7, 1.0];
+    const centroid = (list) => { let x = 0, y = 0; for (const m of list) { x += m.x; y += m.y; } return [x / list.length, y / list.length]; };
+    return { team, t: 0, plan: 'advance', pinT: 0, split: 0, think(dt) {
+      if ((this.t -= dt) > 0) return; this.t = B.thinkEvery;
+      if (teams[team].routed) return;
+      const isArch = (g) => g.members.every((m) => m.type === 'archer');
+      let mine = groups.filter((g) => g.team === team && g.n && !isArch(g)); const bows = groups.filter((g) => g.team === team && g.n && isArch(g));
+      const foes = groups.filter((g) => g.team !== team && g.n);
+      if (this.split === 0 && battleT > 0.5) { this.split = 1; Commands.issue(team, { type: 'splitType', unitType: 'archer' }); return; }
+      if (battleT < B.start) return;
+      if (!foes.length) { for (const g of groups) if (g.team === team && g.throttle > 0) Commands.issue(team, { type: 'halt', group: g.id }); return; }
+      // fold tiny bands into the nearest bigger one
+      for (const g of mine) if (g.n < B.foldBelow) { let bb = null, bd = 1e18; for (const o of mine) if (o !== g && o.n >= B.foldBelow) { const d = (o.cx - g.cx) ** 2 + (o.cy - g.cy) ** 2; if (d < bd) { bd = d; bb = o; } } if (bb) Commands.issue(team, { type: 'join', group: g.id, into: bb.id }); }
+      for (const g of bows) if (g.n < B.foldBelow) { const o = bows.filter((q) => q !== g && q.n >= B.foldBelow).sort((p, q) => (p.cx - g.cx) ** 2 + (p.cy - g.cy) ** 2 - (q.cx - g.cx) ** 2 - (q.cy - g.cy) ** 2)[0]; if (o) Commands.issue(team, { type: 'join', group: g.id, into: o.id }); }
+      mine = groups.filter((g) => g.team === team && g.n && !isArch(g)); if (!mine.length) { this.archers(bows, mine); return; }
+      if (this.split === 1) {   // the wings: the outermost 22% of the block on each side
+        this.split = 2; const body = mine.reduce((p, q) => (q.n > p.n ? q : p)).members.filter((m) => !m.flee && m.type !== 'archer');
+        if (body.length >= 40) {
+          const F = teams[team].front, rx = -Math.sin(F), ry = Math.cos(F), [cx, cy] = centroid(body), lat = (m) => (m.x - cx) * rx + (m.y - cy) * ry;
+          const sorted = body.slice().sort((p, q) => lat(p) - lat(q)), k = Math.round(body.length * B.wingFrac);
+          const L = Commands.issue(team, { type: 'splitIds', ids: sorted.slice(0, k).map((m) => m.id) }); if (L) L.role = 'L';
+          const Rg = Commands.issue(team, { type: 'splitIds', ids: sorted.slice(-k).map((m) => m.id) }); if (Rg) Rg.role = 'R';
+          return;
+        }
+      }
+      const P = men.filter((m) => m.alive && m.team !== team && !m.flee && m.type !== 'archer'), body = P.length ? P : men.filter((m) => m.alive && m.team !== team && !m.flee); if (!body.length) return;
+      const [px, py] = centroid(body);
+      let ax = 0, ay = 0, an = 0; for (const g of mine) { ax += g.cx * g.n; ay += g.cy * g.n; an += g.n; } ax /= an; ay /= an;
+      const D = Math.hypot(px - ax, py - ay) || 1, ux = (px - ax) / D, uy = (py - ay) / D, lx = -uy, ly = ux;
+      let halfW = 30; for (const m of body) halfW = Math.max(halfW, Math.abs((m.x - px) * lx + (m.y - py) * ly));
+      let fighting = 0; for (const m of men) if (m.alive && m.team === team && m.engaged) fighting++;
+      const wings = mine.filter((g) => g.role === 'L' || g.role === 'R'), cen = mine.filter((g) => g.role !== 'L' && g.role !== 'R');
+      let cx0 = ax, cy0 = ay; if (cen.length) { let x = 0, y = 0, n = 0; for (const g of cen) { x += g.cx * g.n; y += g.cy * g.n; n += g.n; } cx0 = x / n; cy0 = y / n; }
+      const wingPt = (g) => { let side = Math.sign((g.cx - ax) * lx + (g.cy - ay) * ly); if (!side) side = g.role === 'L' ? -1 : 1;
+        if (this.plan === 'advance') return [cx0 + ux * 20 + lx * side * (halfW + B.flankOut[1]), cy0 + uy * 20 + ly * side * (halfW + B.flankOut[1])];
+        return [px + lx * side * (halfW + B.flankOut[0]) + ux * 25, py + ly * side * (halfW + B.flankOut[0]) + uy * 25]; };
+      if (this.plan === 'advance' && D < B.pinDist) this.plan = 'pin';
+      if (this.plan === 'pin') { this.pinT += B.thinkEvery; const set = wings.every((g) => { const [wx, wy] = wingPt(g); return Math.hypot(wx - g.cx, wy - g.cy) < B.wingSetDist + 10; }); if (set || this.pinT > B.pinMax) this.plan = 'assault'; }
+      if (fighting > teams[team].initial * B.assaultContact) this.plan = 'assault';   // they came at us: fight it out
       for (const g of mine) {
-        const arch = g.members.every((m) => m.type === 'archer');
-        // nearest enemy to group
-        let nd = 1e9, nx = ex, ny = ey; for (const m of men) if (m.alive && m.team !== team) { const d = Math.hypot(m.x - g.cx, m.y - g.cy); if (d < nd) { nd = d; nx = m.x; ny = m.y; } }
-        let dx = nx - g.cx, dy = ny - g.cy, thr;
-        if (arch) { thr = nd > (C.bot.archerHold || 250) ? 0.25 : nd < 120 ? 0.3 : 0; if (nd < 120) { dx = -dx; dy = -dy; } }
-        else if (g.flankSide && battleT < C.bot.flankAfter + 7) { const hx = Math.cos(teams[team].front), hy = Math.sin(teams[team].front); dx = -hy * g.flankSide * 1 + hx * 0.5; dy = hx * g.flankSide + hy * 0.5; thr = 0.6; }
-        else thr = nd < C.bot.chargeDist ? C.bot.aggression + 0.2 : nd < 260 ? 0.5 : 0.3;
-        if (thr <= 0) Commands.issue(team, { type: 'halt', group: g.id }); else Commands.issue(team, { type: 'move', group: g.id, dx, dy, throttle: thr });
+        let f = null, bd = 1e18; for (const o of foes) { const d = (o.cx - g.cx) ** 2 + (o.cy - g.cy) ** 2 - o.n * 300; if (d < bd) { bd = d; f = o; } }
+        const dx = f.cx - g.cx, dy = f.cy - g.cy, d = Math.hypot(dx, dy) || 1, fx = dx / d, fy = dy / d;
+        let busy = 0; for (const m of g.members) if (m.engaged) busy++;
+        let tx, ty, pace;
+        if (this.plan === 'assault' || busy > g.n * 0.25) { tx = f.cx + fx * 30; ty = f.cy + fy * 30; pace = d > 220 ? 1 : d > 90 ? (g.sta > 0.45 ? 2 : 1) : (g.sta > 0.25 ? 3 : 2); }   // walk in to keep the legs fresh, run only for the last stretch
+        else if (g.role === 'L' || g.role === 'R') { [tx, ty] = wingPt(g); const wd = Math.hypot(tx - g.cx, ty - g.cy); pace = this.plan === 'pin' && wd > 120 ? 2 : wd > 30 ? 1 : 0; }
+        else { tx = px - ux * B.holdDist; ty = py - uy * B.holdDist; pace = Math.hypot(tx - g.cx, ty - g.cy) > 25 ? 1 : 0; }   // the centre stops just out of reach of your spears, in range of its own bows
+        if (g.sta < 0.2 && d > 160) pace = 0;
+        this.order(g, tx, ty, pace, fx, fy);
+      }
+      this.archers(bows, mine);
+    },
+    order(g, tx, ty, pace, fx, fy) {
+      tx = clamp(tx, 10, WW - 10); ty = clamp(ty, 10, WH - 10); const dx = tx - g.cx, dy = ty - g.cy;
+      if (!pace || Math.hypot(dx, dy) < 25) { if (g.throttle > 0) Commands.issue(this.team, { type: 'halt', group: g.id }); return; }
+      Commands.issue(this.team, { type: 'move', group: g.id, dx, dy, throttle: PACE[pace] });
+    },
+    // archers: shoot the thickest knot in range, halting to do it; with nothing to shoot keep archerBehind behind the spears; back away from anyone within archerFlee
+    archers(bows, mine) {
+      for (const g of bows) {
+        let fx = 0, fy = 0, fn = 0, close = 1e9; for (const m of men) if (m.alive && m.team !== this.team && !m.flee) { fx += m.x; fy += m.y; fn++; close = Math.min(close, Math.hypot(m.x - g.cx, m.y - g.cy)); }
+        if (!fn) { this.order(g, g.cx, g.cy, 0); continue; } fx /= fn; fy /= fn;
+        const dx = fx - g.cx, dy = fy - g.cy, d = Math.hypot(dx, dy) || 1, ux = dx / d, uy = dy / d;
+        if (close < B.archerFlee) this.order(g, g.cx - ux * 70, g.cy - uy * 70, 2);
+        else if (g.aim) this.order(g, g.cx, g.cy, 0);
+        else if (mine.length) { let ix = 0, iy = 0, n = 0; for (const o of mine) { ix += o.cx * o.n; iy += o.cy * o.n; n += o.n; } this.order(g, ix / n - ux * B.archerBehind, iy / n - uy * B.archerBehind, 1); }
+        else this.order(g, g.cx + ux * (d - 330 * 0.75), g.cy + uy * (d - 330 * 0.75), 1);
       }
     } };
   }
@@ -371,7 +574,7 @@
   const panOf = (x) => clamp((toScreen(x, 0).x / SW) * 2 - 1, -1, 1) * 0.7;
   function pickGroup(sx, sy) {
     const w = toWorld(sx, sy); const r = C.control.pickRadiusPx / (R3D ? R3D.pxPerUnit(w.x, w.y) : cam.z); let best = null, bd = r;
-    forNear(w.x, w.y, r, (m) => { if (m.team !== 0) return; const d = Math.hypot(m.x - w.x, m.y - w.y); if (d < bd) { bd = d; best = m.group; } });
+    forNear(w.x, w.y, r, (m) => { if (m.team !== 0 || !m.alive || m.flee) return; const d = Math.hypot(m.x - w.x, m.y - w.y); if (d < bd) { bd = d; best = m.group; } });
     return best;
   }
   function select(g) { if (g && g !== selected) { selected = g; Haptics.tick(); AudioSys.play('ui_tick', { vol: 0.6, rate: 1.2 }); } }
@@ -426,7 +629,10 @@
     const z = Math.min(SW / (x1 - x0), SH / (y1 - y0));
     let tx = (x0 + x1) / 2, ty = (y0 + y1) / 2; if (state === 'menu') tx += Math.sin(time * 0.1) * 12;
     // ease: zoom out fast (never lose a unit), zoom in slowly
-    const kz = instant ? 1 : Math.min(1, dt * C.camera.lerp * (z < cam.z ? 3 : 0.6)), kp = instant ? 1 : Math.min(1, dt * C.camera.lerp * 1.5);
+    // pass 5: while a thumb is down the view eases much slower (the ground doesn't slide away under the drag) -- unless someone is about to leave the screen
+    const hw = SW / (2 * cam.z), hh = SH / (2 * cam.z), inView = x0 >= cam.x - hw && x1 <= cam.x + hw && y0 >= cam.y - hh && y1 <= cam.y + hh;
+    const he = inp.down && inView ? C.camera.holdEase || 1 : 1;
+    const kz = instant ? 1 : Math.min(1, dt * C.camera.lerp * (z < cam.z ? 3 : 0.6 * he)), kp = instant ? 1 : Math.min(1, dt * C.camera.lerp * 1.5 * he);
     cam.z = lerp(cam.z, z, kz); cam.x = lerp(cam.x, tx, kp); cam.y = lerp(cam.y, ty, kp);
   }
 
@@ -514,9 +720,9 @@
     for (const m of men) {
       if (!m.alive || m.x < vx0 - 20 || m.x > vx1 + 20 || m.y < vy0 - 20 || m.y > vy1 + 20) continue;
       const S = teams[m.team].sprites[m.type]; const sp = Math.abs(m.vx) + Math.abs(m.vy);
-      const img = m.atk > 0 ? S.attack : sp > 5 ? S.walk[(m.step | 0) & 3] : (m.engaged && S.brace ? S.brace : S.idle);
-      const c = Math.cos(m.face) * sc, s = Math.sin(m.face) * sc; const half = S.idle.width / 2;
-      ctx.setTransform(c, s, -s, c, ox + m.x * z, oy + m.y * z);
+      const img = m.atk > 0 ? S.attack : sp > 5 ? S.walk[(m.step | 0) & 3] : ((m.engaged || m.cover > 0) && S.brace ? S.brace : S.idle);
+      const lift = m.z > 0 ? 1 + m.z * 0.025 : 1, c = Math.cos(m.face + m.tilt * 0.6) * sc * lift, s = Math.sin(m.face + m.tilt * 0.6) * sc * lift; const half = S.idle.width / 2;   // pass 5: thrown men loom up and spin
+      ctx.setTransform(c, s, -s, c, ox + m.x * z, oy + (m.y - Math.max(0, m.z) * 0.6) * z);
       if (time - m.lastHit < 0.12) ctx.globalAlpha = 0.6;
       ctx.drawImage(img, -half, -half); ctx.globalAlpha = 1;
     }
@@ -569,7 +775,42 @@
     }
     ctx.globalAlpha = a; ctx.beginPath(); ctx.moveTo(x1 + ux * w * 1.6, y1 + uy * w * 1.6); ctx.lineTo(x1 + nx * w * 1.2, y1 + ny * w * 1.2); ctx.lineTo(x1 - nx * w * 1.2, y1 - ny * w * 1.2); ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
   }
+  // pass 5: how many men stand in each band, written over their heads (Roman serif, parchment for yours, the enemy's tunic for theirs),
+  // runaways counted at their centroid, and an arrow on the screen edge for any band the camera can't show (a safety net: the fit keeps everyone in view)
+  const lighten = (hex, k) => { const n = parseInt(hex.slice(1), 16), c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => Math.round(v + (255 - v) * k)); return `rgb(${c[0]},${c[1]},${c[2]})`; };
+  function teamUI(t) { const T = teams[t]; return T._ui || (T._ui = t === 0 ? '#f4e8c8' : lighten(T.tunic || '#c04030', 0.45)); }
+  function drawBadges() {
+    const marks = [];
+    for (const g of groups) if (g.n) {
+      let top = 1e9, sx = 0, n = 0; const arch = g.members.every((m) => m.type === 'archer');
+      for (const m of g.members) { const p = R3D ? R3D.toScreenH(m.x, m.y, 20 * (C.r3d.manHeight || 1)) : toScreen(m.x, m.y - 9); if (p.y < top) top = p.y; sx += p.x; n++; }
+      marks.push({ x: sx / n, y: top - 7, wx: g.cx, wy: g.cy, t: g.team, txt: arch ? `${g.n} bows` : String(g.n), a: 1 });
+    }
+    for (const t of [0, 1]) { let x = 0, y = 0, n = 0; for (const m of men) if (m.alive && m.flee && m.team === t) { x += m.x; y += m.y; n++; }
+      if (n) { const p = R3D ? R3D.toScreenH(x / n, y / n, 24 * (C.r3d.manHeight || 1)) : toScreen(x / n, y / n - 12); marks.push({ x: p.x, y: p.y, wx: x / n, wy: y / n, t, txt: `${n} fleeing`, a: 0.7, it: true }); } }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'; ctx.lineJoin = 'round';
+    const top = R3D ? (C.r3d.safePx || {}).top || 50 : 48, bot = SH - 66, l = 18, r = SW - 18;
+    const placed = [];
+    for (const k of marks) {
+      const col = teamUI(k.t); ctx.globalAlpha = k.a;
+      const c = toScreen(k.wx, k.wy), off = c.x < 4 || c.x > SW - 4 || c.y < 4 || c.y > SH - 4;
+      if (!off) {
+        let y = Math.max(top + 10, k.y); const w = k.txt.length * 7 + 4;
+        for (let it = 0; it < 4; it++) { const hit = placed.find((q) => Math.abs(q.x - k.x) < (q.w + w) / 2 && Math.abs(q.y - y) < 13); if (!hit) break; y = hit.y - 13; }   // stacked bands in a melee: lift the label clear
+        placed.push({ x: k.x, y, w });
+        ctx.font = `${k.it ? 'italic ' : ''}600 12px Georgia, 'Times New Roman', serif`; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(20,16,10,0.62)'; ctx.strokeText(k.txt, k.x, y); ctx.fillStyle = col; ctx.fillText(k.txt, k.x, y);
+      } else {
+        const cx = SW / 2, cy = (top + bot) / 2, dx = c.x - cx, dy = c.y - cy, f = Math.min((r - l) / 2 / Math.max(1e-6, Math.abs(dx)), (bot - top) / 2 / Math.max(1e-6, Math.abs(dy)));
+        const ex = cx + dx * f, ey = cy + dy * f, ang = Math.atan2(dy, dx), ux = Math.cos(ang), uy = Math.sin(ang);
+        ctx.save(); ctx.translate(ex, ey); ctx.rotate(ang); ctx.fillStyle = 'rgba(20,16,10,0.55)'; ctx.beginPath(); ctx.arc(-8, 0, 13, 0, 6.283); ctx.fill();
+        ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(2, 0); ctx.lineTo(-10, -7); ctx.lineTo(-6, 0); ctx.lineTo(-10, 7); ctx.closePath(); ctx.fill(); ctx.restore();
+        ctx.font = `600 11px Georgia, serif`; ctx.textBaseline = 'middle'; const lx = ex - ux * 34, ly = ey - uy * 26; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(20,16,10,0.6)'; ctx.strokeText(k.txt, lx, ly); ctx.fillStyle = col; ctx.fillText(k.txt, lx, ly); ctx.textBaseline = 'alphabetic';
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
   function drawControls() {
+    drawBadges();
     // group markers
     for (const g of groups) if (g.team === 0 && g.n) {
       const s = toScreen(g.cx, g.cy); const sel = g === selected;
@@ -610,23 +851,35 @@
   }
   function startBattle() {
     state = 'battle'; battleT = 0; show('battle');
-    AudioSys.stopMusic(); AudioSys.play('battle_horn', { vol: 1 }); Haptics.horn();
+    AudioSys.stopMusic(); AudioSys.play('battle_horn', { vol: 1 }); Haptics.start(); endT = 0; moraleAcc = 0; hudT = 0;
     flash('Drag from your army • far = CHARGE');
   }
+  const standing = (t) => { let n = 0; for (const m of men) if (m.alive && m.team === t && !m.flee) n++; return n; };
+  const fledN = (t) => { let n = teams[t].fled; for (const m of men) if (m.alive && m.flee && m.team === t) n++; return n; };   // escaped + still running
   function endBattle(win) {
+    $('flash').style.opacity = 0; flashT = 0;   // the end card carries the news; don't stack the rout banner over it
+    Haptics.result && Haptics.result(win);
     state = 'end'; endT = 0; AudioSys.silenceLayers(); AudioSys.play(win ? 'victory' : 'defeat'); setTimeout(() => AudioSys.playMusic(0.35), 2500);
     $('endtitle').textContent = win ? 'Victory' : 'Defeat';
     $('endsub').textContent = win ? `${teams[1].name} ${teams[1].routed ? 'routs from the field' : 'is destroyed'}.` : `${teams[0].name} ${teams[0].routed ? 'breaks and flees' : 'has fallen'}.`;
-    $('endstats').innerHTML = `<div><img src="${flagImg(teams[0])}"> ${teams[0].name}: <b>${teams[0].alive}</b> standing · ${teams[0].kills} kills</div><div><img src="${flagImg(teams[1])}"> ${teams[1].name}: <b>${teams[1].alive}</b> standing · ${teams[1].kills} kills</div>`;
+    $('endstats').innerHTML = `<div><img src="${flagImg(teams[0])}"> ${teams[0].name}: <b>${standing(0)}</b> standing · ${teams[0].kills} kills · ${fledN(0)} fled</div><div><img src="${flagImg(teams[1])}"> ${teams[1].name}: <b>${standing(1)}</b> standing · ${teams[1].kills} kills · ${fledN(1)} fled</div>`;
     setTimeout(() => show('end'), 1600);
   }
+  // pass 5: an army only breaks for good when it is truly beaten -- few left on their feet even counting the men who might still rally,
+  // and those few heavily outnumbered (or no spearmen left while the enemy still has some). Then they all run. Otherwise runaways get a moment to rally.
   function checkEnd(dt) {
-    for (let i = 0; i < 2; i++) {
-      const t = teams[i], o = teams[1 - i];
-      if (!t.routed && t.alive / t.initial < CB.routAt && o.alive > t.alive * 1.6) { t.routed = true; t.routT = 0; for (const m of men) if (m.team === i) m.flee = true; flash(t.name + ' routs!'); }
+    const a = [0, 0], f = [0, 0], sp = [0, 0], AB = MO.armyBreak;
+    for (const m of men) if (m.alive) { if (m.flee) f[m.team]++; else { a[m.team]++; if (m.type !== 'archer') sp[m.team]++; } }
+    for (let k = 0; k < 2; k++) {
+      const t = teams[k], tot = t.initial;
+      if (!t.routed && a[k] > 0 && ((a[k] <= Math.max(AB.standMin, tot * AB.standFrac) && a[k] + f[k] <= tot * AB.totalFrac && a[1 - k] >= a[k] * AB.outnumber) || (!sp[k] && sp[1 - k] >= AB.spearsLeft))) {
+        t.routed = true; t.routT = 0; for (const m of men) if (m.alive && m.team === k) { startFlee(m); m.mor = 0; } a[k] = 0;
+        flash(k ? `${t.name} breaks and runs!` : `${t.name} breaks!`); Haptics.broke && Haptics.broke();
+      }
       if (t.routed) t.routT += dt;
-      if (t.alive <= 0 || (t.routed && t.routT > 5)) { endBattle(i === 1); return; }
     }
+    const wait = (k) => (teams[k].routed || f[k] < 3 ? MO.endWait : 6);
+    if (a[0] === 0 || a[1] === 0) { endT += dt; const k = a[0] === 0 ? 0 : 1; if (endT > wait(k) || (teams[k].routed && teams[k].routT > 3)) endBattle(a[0] > 0); } else endT = 0;
   }
   // HUD + menus
   $('btnPlay').onclick = () => { AudioSys.unlock(); AudioSys.playMusic(); newBattle(); state = 'setup'; show('setup'); AudioSys.play('ui_confirm'); };
@@ -639,7 +892,7 @@
   $('btnMute').onclick = () => { AudioSys.setMuted(AudioSys.enabled); $('btnMute').textContent = AudioSys.enabled ? '🔊' : '🔇'; };
   $('btnRematch').onclick = () => { AudioSys.playMusic(1); newBattle(); state = 'setup'; show('setup'); };
   $('btnMenu').onclick = () => { AudioSys.playMusic(1); newBattle(); state = 'menu'; show('menu'); };
-  document.querySelectorAll('button').forEach((b) => b.addEventListener('pointerdown', () => { AudioSys.unlock(); if (!['btnPlay', 'btnHorn', 'btnArmyDone'].includes(b.id) && !b.classList.contains('sw')) AudioSys.play('ui_select', { vol: 0.7 }); }));
+  document.querySelectorAll('button').forEach((b) => b.addEventListener('pointerdown', () => { AudioSys.unlock(); Haptics.ui(); if (!['btnPlay', 'btnHorn', 'btnArmyDone'].includes(b.id) && !b.classList.contains('sw')) AudioSys.play('ui_select', { vol: 0.7 }); }));
   document.addEventListener('pointerdown', () => { AudioSys.unlock(); if (state === 'menu' || state === 'setup') AudioSys.playMusic(1); });
   $('setHaptics').checked = Haptics.on; $('setHaptics').onchange = (e) => Haptics.set(e.target.checked);
   $('setSound').checked = true; $('setSound').onchange = (e) => AudioSys.setMuted(!e.target.checked);
@@ -674,7 +927,7 @@
   // read-only view of the simulation for the 3D renderer (getters: arrays get replaced on new battle)
   const SIM = {
     get men() { return men; }, get particles() { return particles; }, get arrows() { return arrows; }, get groups() { return groups; }, get teams() { return teams; },
-    get state() { return state; }, get selected() { return selected; }, get battleT() { return battleT; },
+    get state() { return state; }, get selected() { return selected; }, get battleT() { return battleT; }, get inputDown() { return !!inp.down; }, get fleeGroups() { return fleeG; }, dbg,
     get ground() { return ground; }, get WW() { return WW; }, get WH() { return WH; }, get MAP() { return MAP; }, get COLS() { return COLS; }, get ROWS() { return ROWS; },
     get trample() { return trample; }, get trampleDx() { return trampleDx; }, get mudGrid() { return mudGrid; }, TR, get TW() { return TW; }, get TH() { return TH; },
     terrainAt: (x, y) => terrainAt(x, y), get SW() { return SW; }, get SH() { return SH; },
@@ -682,20 +935,34 @@
 
   // ------------------------------------------------------------------ loop ---
   let last = performance.now();
+  // pass 5 HUD: per side, the average morale and breath of the men still standing, and how many stand
+  let hudT = 0; const hudEl = {};
+  function updateHUD() {
+    const mo = [0, 0], st = [0, 0], n = [0, 0];
+    for (const m of men) if (m.alive && !m.flee) { n[m.team]++; mo[m.team] += m.mor; st[m.team] += m.stam; }
+    ['hp', 'he'].forEach((k, t) => {
+      const el = hudEl[k] || (hudEl[k] = { mor: $(k + 'mor'), sta: $(k + 'sta'), cnt: $(k + 'count'), bar: $(k + 'bar') });
+      const M = n[t] ? mo[t] / n[t] : 0, S = n[t] ? st[t] / n[t] : 0;
+      if (el.mor) { el.mor.style.width = M.toFixed(1) + '%'; el.mor.parentNode.classList.toggle('low', M < 30); }
+      if (el.sta) { el.sta.style.width = (100 * S).toFixed(1) + '%'; el.sta.parentNode.classList.toggle('low', S < 0.25); }
+      if (el.bar) el.bar.style.width = (100 * n[t] / teams[t].initial) + '%';
+      if (el.cnt) el.cnt.textContent = n[t];
+    });
+  }
   function frame(now) {
     let dt = Math.min(0.05, (now - last) / 1000); last = now; time += dt;
     if (state === 'battle' || state === 'end') {
       const sdt = R3D ? dt * R3D.timeScale(dt) : dt;   // 3D: hit-stop on big impacts
       for (let w = 0; w < WARP; w++) {                // ?warp=N: N sim steps per frame (headless tests on slow software GL)
         battleT += sdt; for (const b of bots) b.think(sdt);
-        updateGroups(sdt); updateMen(sdt); updateParticles(sdt); updateTrample(sdt);
+        updateGroups(sdt); updateMen(sdt); if (state === 'battle') moraleTick(sdt); updateParticles(sdt); updateTrample(sdt);
         if (state === 'battle') checkEnd(sdt);
         if (w < WARP - 1) flushDecals();
       }
     } else { for (const m of men) m.step += 0; }
     flushDecals(); updateCamera(dt); updateAudio(dt); render();
     if (flashT > 0 && (flashT -= dt) <= 0) $('flash').style.opacity = 0;
-    if (state === 'battle') { $('hpbar').style.width = (100 * teams[0].alive / teams[0].initial) + '%'; $('hebar').style.width = (100 * teams[1].alive / teams[1].initial) + '%'; $('hpcount').textContent = teams[0].alive; $('hecount').textContent = teams[1].alive; }
+    if (state === 'battle' && (hudT -= dt) <= 0) { hudT = 0.2; updateHUD(); }
     requestAnimationFrame(frame);
   }
   resize(); newBattle(Number(Q.get('seed')) || undefined);

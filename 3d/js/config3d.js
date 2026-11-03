@@ -22,9 +22,9 @@ CONFIG.r3d = {
   fov: 36, pitchDeg: 50,                // tilted high-angle cinematic camera
   manHeight: 1.9,                       // soldier mesh scale (mesh is ~19 units tall -> ~38 world units)
   fitMargin: 12,                        // world units around the bounding box of every living man (covers shield + shoulders at manHeight 2)
-  safePx: { top: 50, bottom: 66, side: 8 },    // CSS px kept clear of the HUD bar (top) and rally/mute row (bottom); converted to an NDC rectangle on resize
+  safePx: { top: 64, bottom: 66, side: 8 },   // pass 5: top +14 for the soldier-count badges over the far army    // CSS px kept clear of the HUD bar (top) and rally/mute row (bottom); converted to an NDC rectangle on resize
   ndc: { x: 0.95, top: 0.84, bottom: -0.83 },   // fallback safe rectangle
-  minDist: 200, fitPad: { x: 0.06, z: 0.08 },   // fitPad: extra margin as a fraction of the army extent (room to flank)
+  minDist: 200, holdEase: 0.35, fitPad: { x: 0.06, z: 0.08 },   // fitPad: extra margin as a fraction of the army extent (room to flank)
                           // never closer than this (keeps context even when few men remain)
   zoomOutRate: 4.0, zoomInRate: 1.3, panRate: 2.8,
   lod: { pxIn: 26, pxOut: 20, few: 220, triBudget: { med: 1.7e6, high: 2.4e6 } },   // soldier LOD: hi-detail when a man is taller than pxIn px (drops below pxOut) or < `few` figures, and only if figures x hi-tris fit triBudget

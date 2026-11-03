@@ -41,17 +41,33 @@ window.CONFIG = {
     knockback: 22,
     routAt: 0.22,               // army routs below this fraction alive (if outnumbered)
   },
-  arrows: { speed: 230, arcK: 0.32, spread: 14, damage: 55, hitRadius: 5.5, shieldBlock: 0.4 },
+  arrows: { speed: 230, arcK: 0.32, spread: 14, damage: 55, hitRadius: 5.5, shieldBlock: 0.4,
+            // pass 5: aim at the thickest enemy knot (score = foes - friendlyK x friends within knotR, lead by v x lead), never where own spearmen stand within friendlyR of the landing spot;
+            // hit chance by target state: still behind a raised shield / still / moving / fleeing
+            knotR: 32, friendlyK: 4, lead: 0.8, friendlyR: 16, retarget: 0.8, scatter: [10, 0.1], coverR: 50,
+            hitP: { shield: 0.12, still: 0.4, moving: 0.72, flee: 0.85, archer: 0.5 }, dmgStill: [38, 68], dmgMoving: [50, 90] },
   fx: { maxParticles: 1400, bloodDrops: [6, 14], decalsPerFrame: 40 },
   grass: { tufts: 1500, recover: 0.04, trampleK: 0.5 },
-  camera: { margin: 34, minViewUnits: 200, lerp: 1.4 },   // camera always fits ALL living men + margin; never closer than minViewUnits on the short axis
+  camera: { margin: 34, minViewUnits: 200, lerp: 1.4, holdEase: 0.35 },   // holdEase: camera eases this much slower while a thumb is down (pass 5)   // camera always fits ALL living men + margin; never closer than minViewUnits on the short axis
   render: { unitScale: 1.5, shadowDx: -3.2, shadowDy: 3.6, shadowAlpha: 0.5 },   // soldiers drawn larger than their footprint for readability; sun from top-right,
   audio: {
     master: 0.9, music: 0.55, sfx: 0.9,
     bloodPerSec: 4, bloodPoly: 3, clashPerSec: 7,
     ambienceTargetDb: -30, ambienceDuck: 0.4,
   },
-  bot: { thinkEvery: 0.6, chargeDist: 150, flankAfter: 6, aggression: 0.8 },
+  bot: { thinkEvery: 0.6, chargeDist: 150, flankAfter: 6, aggression: 0.8,
+         // pass 5 (Thumb Legions plan): 22% wings each side, centre pins 150 short in bow range, wings flank to halfW+70..90,
+         // assault when wings are set / after pinMax s / when > assaultContact x army size men are in contact; archers back off inside archerFlee
+         start: 1.4, wingFrac: 0.22, holdDist: 150, pinDist: 190, pinMax: 12, assaultContact: 0.15, flankOut: [70, 90], wingSetDist: 70, archerFlee: 80, archerBehind: 40, foldBelow: 5 },
+  // pass 5: per-soldier morale (0..100). Each man ticks every `tick` s from what he sees within `radius`; < breakAt he flees on his own,
+  // > rallyAt (and enemy > rallyGap away, hp > rallyHp) he rallies to the nearest group within rallyJoin. Army breaks on the three-part test.
+  morale: { tick: 0.25, radius: 28, fleeRadius: 40, start: [78, 100], brave: [0.85, 1.15], breakAt: 5, rallyAt: 35, rallyGap: 70, rallyHp: 0.2, rallyJoin: 250,
+            hitK: 0.05, flankK: 1.5, deathRadius: 35, deathFriend: 2.5, deathFoe: 2, arrowHit: 1.5, escapeGap: 300, escapeT: 6, rallyHorn: 20, rallyHornCD: 8,
+            armyBreak: { standFrac: 0.15, standMin: 5, totalFrac: 0.3, outnumber: 2.5, spearsLeft: 10 }, endWait: 2.2 },
+  // pass 5: wounds — below injAt x maxHp a man is 'inj': slower, recovers stamina slower; luck (-1..1) can turn a lethal blow into a scrape
+  wounds: { injAt: 0.55, bigHit: 0.2, bigHitChance: 0.35, speedMul: 0.62, recoverMul: 0.6, luckChance: 0.15 },
+  // pass 5: charge impacts — closing speed above `min` hurts / stuns; above `throwAt` men get thrown (and may lose their helmet)
+  impact: { min: 30, throwAt: 58, flank: { front: 1.0, side: 1.45, rear: 2.1 }, dmgK: 0.42, cooldown: 0.7, gravity: 300, landStun: 0.9, helmChance: 0.5 },
 };
 
 // ----------------------------------------------------------------------------
