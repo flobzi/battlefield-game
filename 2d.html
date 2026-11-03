@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="theme-color" content="#2f3a22">
+<title>Battle Field Game — prototype</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#2f3a22;font-family:Georgia,'Times New Roman',serif;color:#f4ecd6;-webkit-user-select:none;user-select:none;touch-action:none}
+  canvas#game{position:fixed;inset:0;touch-action:none}
+  .hidden{display:none!important}
+  .panel{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:radial-gradient(ellipse at center,rgba(30,36,18,.15),rgba(20,24,12,.6));padding:20px;box-sizing:border-box;text-align:center}
+  .card{background:rgba(42,38,26,.82);border:2px solid rgba(240,225,180,.35);border-radius:18px;padding:18px 20px;max-width:440px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,.4);backdrop-filter:blur(3px)}
+  h1{font-size:44px;margin:0;letter-spacing:2px;text-shadow:0 3px 0 #3a2a18,0 0 30px rgba(255,220,140,.4);font-weight:normal}
+  h1 small{display:block;font-size:15px;letter-spacing:4px;opacity:.8;font-style:italic}
+  h2{margin:0 0 8px;font-weight:normal;font-size:26px}
+  button.big{font:inherit;font-size:21px;padding:13px 26px;border-radius:40px;border:2px solid #f0dfae;background:linear-gradient(#8a5a2e,#5e3a1c);color:#fff6dc;min-width:230px;box-shadow:0 4px 0 #2c1c0e,0 8px 20px rgba(0,0,0,.35);cursor:pointer}
+  button.big:active{transform:translateY(3px);box-shadow:0 1px 0 #2c1c0e}
+  button.alt{background:linear-gradient(#5d6a3a,#3d4824)}
+  .vs{display:flex;align-items:center;justify-content:center;gap:14px;margin:8px 0 12px}
+  .vs img{width:72px;height:48px;border-radius:3px;box-shadow:0 3px 8px rgba(0,0,0,.4)}
+  .vs .nm{font-size:15px;max-width:120px}
+  #hud{position:fixed;left:0;right:0;top:0;pointer-events:none}
+  .bar{display:flex;gap:8px;padding:calc(env(safe-area-inset-top) + 8px) 10px 0;align-items:center}
+  .side{flex:1;display:flex;align-items:center;gap:6px;background:rgba(30,28,18,.55);border-radius:12px;padding:5px 8px;font-size:13px}
+  .side img{width:30px;height:20px;border-radius:2px}
+  .side .meter{flex:1;height:6px;background:rgba(255,255,255,.15);border-radius:4px;overflow:hidden}
+  .side .meter div{height:100%;background:#e8d9a8;transition:width .3s}
+  .side.e{flex-direction:row-reverse}
+  #btnRally,#btnMute{position:fixed;pointer-events:auto;font:inherit;border-radius:30px;border:2px solid #f0dfae;background:rgba(94,58,28,.85);color:#fff6dc}
+  #btnRally{right:14px;bottom:calc(env(safe-area-inset-bottom) + 16px);padding:10px 16px;font-size:16px}
+  #btnMute{left:14px;bottom:calc(env(safe-area-inset-bottom) + 16px);padding:8px 12px;font-size:16px}
+  #hint{position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom) + 70px);text-align:center;font-size:12px;opacity:.75;font-style:italic;text-shadow:0 1px 3px #000}
+  #flash{position:fixed;left:0;right:0;top:30%;text-align:center;font-size:26px;font-style:italic;text-shadow:0 2px 8px #000;opacity:0;transition:opacity .4s;pointer-events:none}
+  .row{display:flex;align-items:center;gap:8px;margin:7px 0;flex-wrap:wrap;justify-content:center}
+  .row label{min-width:64px;text-align:right;font-size:14px;opacity:.85}
+  .sw{width:30px;height:30px;border-radius:50%;border:2px solid rgba(255,255,255,.25);cursor:pointer;padding:0}
+  .sw.on{border:3px solid #fff3c8;box-shadow:0 0 10px #ffe8a0}
+  .sw.em{border-radius:6px}
+  input[type=text]{font:inherit;font-size:17px;padding:6px 10px;border-radius:10px;border:1px solid #c8b88a;background:#f4ecd6;color:#2b2218;width:200px}
+  #armyPreview{border-radius:10px;width:380px;max-width:100%;height:auto}
+  #endstats div{margin:6px 0} #endstats img{width:26px;height:17px;vertical-align:middle}
+  .toggle{display:flex;justify-content:space-between;align-items:center;font-size:17px;padding:8px 4px}
+  .toggle input{width:24px;height:24px}
+  .help{font-size:13px;opacity:.8;line-height:1.5;margin-top:4px}
+</style>
+<link rel="icon" href="data:,">
+</head><body>
+<canvas id="game"></canvas>
+
+<div id="menu" class="panel">
+  <h1>BATTLE FIELD<small>a one-thumb battle</small></h1>
+  <div class="card">
+    <button class="big" id="btnPlay">⚔ Battle vs Bot</button><br><br>
+    <button class="big alt" id="btnArmy">⚑ Your Army</button><br><br>
+    <button class="big alt" id="btnSettings">⚙ Settings</button>
+    <div class="help">Drag from your men — direction is where they go, distance is speed (walk → run → CHARGE). Pull back to fall back, sideways to wheel.<br>Double-tap your men to split off those under your thumb. Double-tap open ground to regroup. Tap a group to halt.</div>
+  </div>
+</div>
+
+<div id="setup" class="panel hidden" style="justify-content:flex-end;padding-bottom:40px">
+  <div class="card">
+    <div class="vs"><div><img id="pflag"><div class="nm" id="pname"></div></div><b style="font-size:22px">vs</b><div><img id="eflag"><div class="nm" id="ename"></div></div></div>
+    <button class="big" id="btnHorn">📯 Sound the Horn</button>
+    <div class="row"><button class="big alt" style="min-width:0;font-size:15px;padding:8px 14px" id="btnArmy2">⚑ Army</button><button class="big alt" style="min-width:0;font-size:15px;padding:8px 14px" id="btnBack">Menu</button></div>
+  </div>
+</div>
+
+<div id="army" class="panel hidden">
+  <div class="card" style="max-height:92vh;overflow:auto">
+    <h2>Your Army</h2>
+    <canvas id="armyPreview" width="380" height="110"></canvas>
+    <div class="row"><label>Name</label><input type="text" id="armyName" maxlength="24"></div>
+    <div class="row"><label>Tunic</label><span id="swTunic"></span></div>
+    <div class="row"><label>Helmet</label><span id="swHelmet"></span></div>
+    <div class="row"><label>Shield</label><span id="swShield"></span></div>
+    <div class="row"><label>Flag</label><span id="swField"></span></div>
+    <div class="row"><label>Emblem</label><span id="swEmblem"></span></div>
+    <div class="row"><label>Emblem<br>colour</label><span id="swEmblemCol"></span></div>
+    <button class="big" id="btnArmyDone">Done</button>
+  </div>
+</div>
+
+<div id="settings" class="panel hidden">
+  <div class="card">
+    <h2>Settings</h2>
+    <div class="toggle">Haptics (vibration) <input type="checkbox" id="setHaptics"></div>
+    <div class="toggle">Sound <input type="checkbox" id="setSound"></div>
+    <div class="help">Haptics work on Android/Chrome. iPhone Safari doesn't allow web vibration, so it's skipped there.</div><br>
+    <button class="big" id="btnSettingsDone">Done</button>
+  </div>
+</div>
+
+<div id="end" class="panel hidden">
+  <div class="card"><h1 id="endtitle">Victory</h1><p id="endsub"></p><div id="endstats"></div><br>
+    <button class="big" id="btnRematch">⚔ Rematch</button><br><br><button class="big alt" id="btnMenu">Menu</button></div>
+</div>
+
+<div id="hud" class="hidden">
+  <div class="bar">
+    <div class="side"><img id="hpflag"><span id="hpname"></span><div class="meter"><div id="hpbar" style="width:100%"></div></div><b id="hpcount"></b></div>
+    <div class="side e"><img id="heflag"><span id="hename"></span><div class="meter"><div id="hebar" style="width:100%"></div></div><b id="hecount"></b></div>
+  </div>
+  <div id="hint">drag = move · far = charge · double-tap men = split · double-tap ground = regroup · tap = halt</div>
+  <button id="btnMute">🔊</button>
+  <button id="btnRally">📯 Rally</button>
+</div>
+<div id="flash"></div>
+
+<script src="audio/manifest.js"></script>
+<script src="js/config.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body></html>
